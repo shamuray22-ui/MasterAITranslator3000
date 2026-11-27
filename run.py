@@ -1,5 +1,7 @@
+import re
 import time
 import threading
+import unicodedata
 from pathlib import Path
 
 import argostranslate.package
@@ -81,52 +83,89 @@ def parar_tradutor():
     executando = False
 
 
+def _caixa_delimitadora(caixa):
+    """Retorna x1, y1, x2, y2 para as caixas quadrilaterais do RapidOCR."""
+    pontos = np.asarray(caixa, dtype=float).reshape(-1, 2)
+    return (
+        float(pontos[:, 0].min()), float(pontos[:, 1].min()),
+        float(pontos[:, 0].max()), float(pontos[:, 1].max()),
+    )
+
+
+def _deteccoes_sobrepostas(caixa_a, caixa_b):
+    ax1, ay1, ax2, ay2 = caixa_a
+    bx1, by1, bx2, by2 = caixa_b
+    largura = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    altura = max(0.0, min(ay2, by2) - max(ay1, by1))
+    intersecao = largura * altura
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    uniao = area_a + area_b - intersecao
+    return uniao > 0 and intersecao / uniao >= 0.5
+
+
+def _chave_texto(texto):
+    texto = unicodedata.normalize("NFKC", texto).casefold()
+    return re.sub(r"\W+", "", texto, flags=re.UNICODE)
+
+
 def _extrair_textos_resultado(resultado):
-    """Extrai textos do RapidOCR suportando resultados antigos e novos."""
-    linhas = []
+    """Extrai, ordena e remove deteccoes duplicadas/sobrepostas do RapidOCR."""
+    deteccoes = []
 
     if hasattr(resultado, "txts"):
         caixas = getattr(resultado, "boxes", None)
-        txts = getattr(resultado, "txts", [])
-        for indice, texto in enumerate(txts):
+        for indice, texto in enumerate(getattr(resultado, "txts", [])):
             texto_limpo = str(texto).strip()
             if len(texto_limpo) <= 1:
                 continue
-
             caixa = caixas[indice] if caixas is not None and indice < len(caixas) else None
-            if caixa is not None:
-                ponto_superior = min(float(ponto[1]) for ponto in caixa)
-                ponto_esquerdo = min(float(ponto[0]) for ponto in caixa)
-            else:
-                ponto_superior = len(linhas)
-                ponto_esquerdo = 0
-            linhas.append((ponto_superior, ponto_esquerdo, texto_limpo))
+            try:
+                limites = _caixa_delimitadora(caixa) if caixa is not None else None
+            except (TypeError, ValueError):
+                limites = None
+            deteccoes.append((limites, texto_limpo))
 
     elif resultado:
         for linha in resultado:
             try:
-                caixa = linha[0]
                 texto_limpo = str(linha[1]).strip()
                 if len(texto_limpo) <= 1:
                     continue
-                ponto_superior = min(float(ponto[1]) for ponto in caixa)
-                ponto_esquerdo = min(float(ponto[0]) for ponto in caixa)
-                linhas.append((ponto_superior, ponto_esquerdo, texto_limpo))
+                limites = _caixa_delimitadora(linha[0])
+                deteccoes.append((limites, texto_limpo))
             except (IndexError, TypeError, ValueError):
                 continue
 
-    linhas.sort(key=lambda item: (item[0], item[1]))
-    return [item[2] for item in linhas]
+    deteccoes.sort(key=lambda item: (
+        item[0][1] if item[0] is not None else 0,
+        item[0][0] if item[0] is not None else 0,
+    ))
+
+    unicas = []
+    for limites, texto in deteccoes:
+        chave = _chave_texto(texto)
+        duplicada = any(
+            chave == _chave_texto(texto_existente)
+            and limites is not None
+            and limites_existentes is not None
+            and _deteccoes_sobrepostas(limites, limites_existentes)
+            for limites_existentes, texto_existente in unicas
+        )
+        if not duplicada:
+            unicas.append((limites, texto))
+
+    return [texto for _, texto in unicas]
 
 
 def _preprocessar_imagem(imagem):
-    """Melhora contraste e nitidez da pequena area capturada pelo OCR."""
+    """Amplia e melhora o contraste sem binarizar texto sobre fundos variados."""
     imagem = cv2.cvtColor(imagem, cv2.COLOR_BGRA2BGR)
     imagem = cv2.resize(imagem, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     imagem_cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
-    imagem_cinza = cv2.bilateralFilter(imagem_cinza, 7, 50, 50)
-    _, imagem_escura = cv2.threshold(imagem_cinza, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return cv2.cvtColor(imagem_escura, cv2.COLOR_GRAY2BGR)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    imagem_contraste = clahe.apply(imagem_cinza)
+    return cv2.cvtColor(imagem_contraste, cv2.COLOR_GRAY2BGR)
 
 
 def executar_ocr():
@@ -136,18 +175,21 @@ def executar_ocr():
 
     try:
         with mss.mss() as sct:
-            monitor_principal = sct.monitors[1]
-            largura_tela = monitor_principal["width"]
-            altura_tela = monitor_principal["height"]
+            # monitor 0 e a area virtual completa, inclusive monitores com origem negativa.
+            area_tela = sct.monitors[0]
 
             while executando:
                 try:
                     mx, my = pyautogui.position()
                     metade = TAMANHO_CAIXA_MOUSE // 2
-                    esquerda = max(0, mx - metade)
-                    topo = max(0, my - metade)
-                    direita = min(largura_tela, mx + metade)
-                    base = min(altura_tela, my + metade)
+                    esquerda = max(area_tela["left"], mx - metade)
+                    topo = max(area_tela["top"], my - metade)
+                    direita = min(
+                        area_tela["left"] + area_tela["width"], mx + metade
+                    )
+                    base = min(
+                        area_tela["top"] + area_tela["height"], my + metade
+                    )
 
                     monitor = {
                         "top": topo,
