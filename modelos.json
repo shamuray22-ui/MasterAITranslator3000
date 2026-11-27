@@ -1,7 +1,0 @@
-{
-    "det": "C:/Users/Jonh pds/Desktop/tradutorGemini/models/PP-OCRv6_det_small.onnx",
-    "rec": "C:/Users/Jonh pds/Desktop/tradutorGemini/models/PP-OCRv6_rec_small.onnx",
-    "cls": "",
-    "keys": "",
-    "argos": "C:/Users/Jonh pds/Desktop/tradutorGemini/models/translate-en_pt-1_9.argosmodel"
-}
