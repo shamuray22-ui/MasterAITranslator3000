@@ -81,6 +81,54 @@ def parar_tradutor():
     executando = False
 
 
+def _extrair_textos_resultado(resultado):
+    """Extrai textos do RapidOCR suportando resultados antigos e novos."""
+    linhas = []
+
+    if hasattr(resultado, "txts"):
+        caixas = getattr(resultado, "boxes", None)
+        txts = getattr(resultado, "txts", [])
+        for indice, texto in enumerate(txts):
+            texto_limpo = str(texto).strip()
+            if len(texto_limpo) <= 1:
+                continue
+
+            caixa = caixas[indice] if caixas is not None and indice < len(caixas) else None
+            if caixa is not None:
+                ponto_superior = min(float(ponto[1]) for ponto in caixa)
+                ponto_esquerdo = min(float(ponto[0]) for ponto in caixa)
+            else:
+                ponto_superior = len(linhas)
+                ponto_esquerdo = 0
+            linhas.append((ponto_superior, ponto_esquerdo, texto_limpo))
+
+    elif resultado:
+        for linha in resultado:
+            try:
+                caixa = linha[0]
+                texto_limpo = str(linha[1]).strip()
+                if len(texto_limpo) <= 1:
+                    continue
+                ponto_superior = min(float(ponto[1]) for ponto in caixa)
+                ponto_esquerdo = min(float(ponto[0]) for ponto in caixa)
+                linhas.append((ponto_superior, ponto_esquerdo, texto_limpo))
+            except (IndexError, TypeError, ValueError):
+                continue
+
+    linhas.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in linhas]
+
+
+def _preprocessar_imagem(imagem):
+    """Melhora contraste e nitidez da pequena area capturada pelo OCR."""
+    imagem = cv2.cvtColor(imagem, cv2.COLOR_BGRA2BGR)
+    imagem = cv2.resize(imagem, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    imagem_cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
+    imagem_cinza = cv2.bilateralFilter(imagem_cinza, 7, 50, 50)
+    _, imagem_escura = cv2.threshold(imagem_cinza, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return cv2.cvtColor(imagem_escura, cv2.COLOR_GRAY2BGR)
+
+
 def executar_ocr():
     global texto_original_global, traducao_atual_global
     global posicao_traducao_global, ultimo_tempo_traducao
@@ -88,33 +136,30 @@ def executar_ocr():
 
     try:
         with mss.mss() as sct:
+            monitor_principal = sct.monitors[1]
+            largura_tela = monitor_principal["width"]
+            altura_tela = monitor_principal["height"]
+
             while executando:
                 try:
                     mx, my = pyautogui.position()
                     metade = TAMANHO_CAIXA_MOUSE // 2
+                    esquerda = max(0, mx - metade)
+                    topo = max(0, my - metade)
+                    direita = min(largura_tela, mx + metade)
+                    base = min(altura_tela, my + metade)
+
                     monitor = {
-                        "top": max(0, my - metade),
-                        "left": max(0, mx - metade),
-                        "width": TAMANHO_CAIXA_MOUSE,
-                        "height": TAMANHO_CAIXA_MOUSE,
+                        "top": topo,
+                        "left": esquerda,
+                        "width": max(1, direita - esquerda),
+                        "height": max(1, base - topo),
                     }
                     imagem = np.array(sct.grab(monitor))
-                    imagem = cv2.cvtColor(imagem, cv2.COLOR_BGRA2BGR)
+                    imagem = _preprocessar_imagem(imagem)
                     resposta = engine(imagem)
                     resultado = resposta[0] if isinstance(resposta, tuple) else resposta
-
-                    if hasattr(resultado, "txts"):
-                        textos = [
-                            texto for texto in resultado.txts
-                            if texto and len(texto.strip()) > 1
-                        ]
-                    elif resultado:
-                        textos = [
-                            linha[1] for linha in resultado
-                            if len(linha[1].strip()) > 1
-                        ]
-                    else:
-                        textos = []
+                    textos = _extrair_textos_resultado(resultado)
 
                     if textos:
                         texto = " ".join(textos).strip()
