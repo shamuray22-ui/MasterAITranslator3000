@@ -1,7 +1,7 @@
 import json
 import threading
-import time
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -212,6 +212,34 @@ def iniciar_programa():
         print(f"[ERRO COMPLETO] {type(erro).__name__}: {erro}")
 
 
+def quebrar_linhas(texto, fonte, largura_maxima):
+    """Quebra texto por palavras respeitando a largura medida pela fonte."""
+    linhas = []
+    linha_atual = ""
+    for palavra in texto.split():
+        candidato = f"{linha_atual} {palavra}".strip()
+        if linha_atual and fonte.measure(candidato) > largura_maxima:
+            linhas.append(linha_atual)
+            linha_atual = palavra
+        else:
+            linha_atual = candidato
+    if linha_atual:
+        linhas.append(linha_atual)
+    return "\n".join(linhas) or " "
+
+
+def pontos_retangulo_arredondado(x1, y1, x2, y2, raio=12):
+    raio = min(raio, (x2 - x1) / 2, (y2 - y1) / 2)
+    return [
+        x1 + raio, y1, x2 - raio, y1,
+        x2, y1, x2, y1 + raio,
+        x2, y2 - raio, x2, y2,
+        x2 - raio, y2, x1 + raio, y2,
+        x1, y2, x1, y2 - raio,
+        x1, y1 + raio, x1, y1,
+    ]
+
+
 def iniciar_overlay():
     for widget in janela_config.winfo_children():
         widget.destroy()
@@ -232,31 +260,148 @@ def iniciar_overlay():
     )
     canvas.pack(fill="both", expand=True)
 
+    fonte_original = tkfont.Font(root=janela_config, family="Segoe UI", size=10)
+    fonte_traducao = tkfont.Font(
+        root=janela_config, family="Segoe UI", size=12, weight="bold"
+    )
+    fonte_rotulo = tkfont.Font(
+        root=janela_config, family="Segoe UI", size=8, weight="bold"
+    )
+
+    caixa_busca = canvas.create_rectangle(
+        0, 0, 0, 0, outline="#f9e2af", width=2, state="hidden"
+    )
+    sombra = canvas.create_polygon(
+        0, 0, 0, 0, fill="#000000", outline="", stipple="gray50",
+        smooth=True, splinesteps=12, state="hidden",
+    )
+    cartao = canvas.create_polygon(
+        0, 0, 0, 0, fill="#111827", outline="#64748b", width=1,
+        stipple="gray50", smooth=True, splinesteps=12, state="hidden",
+    )
+    rotulo_original = canvas.create_text(
+        0, 0, anchor="nw", text="ORIGINAL", fill="#94a3b8",
+        font=fonte_rotulo, state="hidden",
+    )
+    texto_original = canvas.create_text(
+        0, 0, anchor="nw", text="", fill="#e2e8f0",
+        font=fonte_original, state="hidden",
+    )
+    separador = canvas.create_line(
+        0, 0, 0, 0, fill="#475569", width=1, state="hidden"
+    )
+    rotulo_traducao = canvas.create_text(
+        0, 0, anchor="nw", text="TRADUCAO", fill="#a6e3a1",
+        font=fonte_rotulo, state="hidden",
+    )
+    texto_traducao = canvas.create_text(
+        0, 0, anchor="nw", text="", fill="#ffffff",
+        font=fonte_traducao, state="hidden",
+    )
+
+    ultimo_estado_cartao = None
+    ultima_caixa_busca = None
+
     def atualizar_frame():
-        canvas.delete("all")
+        nonlocal ultimo_estado_cartao, ultima_caixa_busca
         if not run.executando:
             return
+
         try:
             mx, my = run.pyautogui.position()
             metade = run.TAMANHO_CAIXA_MOUSE // 2
-            if time.time() - run.ultimo_tempo_traducao > 2.5:
-                run.traducao_atual_global = ""
-            if run.traducao_atual_global:
+            tem_texto = bool(
+                run.texto_original_global
+                and run.traducao_atual_global
+                and time.time() - run.ultimo_tempo_traducao
+                <= run.TEMPO_TOLERANCIA_DETECCAO
+            )
+
+            if tem_texto:
                 tx, ty = run.posicao_traducao_global
-                canvas.create_rectangle(
-                    tx - metade, ty - metade, tx + metade, ty + metade,
-                    fill="black", outline="#a6e3a1", width=2,
+                original = run.texto_original_global
+                traducao = run.traducao_atual_global
+                largura_conteudo_maxima = 390
+                original_quebrado = quebrar_linhas(
+                    original, fonte_original, largura_conteudo_maxima
                 )
-                canvas.create_text(
-                    tx, ty, text=run.traducao_atual_global,
-                    fill="#ffffff", anchor="center", width=180,
-                    font=("Segoe UI", 9, "bold"),
+                traducao_quebrada = quebrar_linhas(
+                    traducao, fonte_traducao, largura_conteudo_maxima
                 )
+                linhas_original = original_quebrado.count("\n") + 1
+                linhas_traducao = traducao_quebrada.count("\n") + 1
+                largura_conteudo = min(
+                    largura_conteudo_maxima,
+                    max(
+                        max(fonte_original.measure(linha) for linha in original_quebrado.split("\n")),
+                        max(fonte_traducao.measure(linha) for linha in traducao_quebrada.split("\n")),
+                        190,
+                    ),
+                )
+                margem = 16
+                largura_cartao = largura_conteudo + margem * 2
+                altura_original = linhas_original * fonte_original.metrics("linespace")
+                altura_traducao = linhas_traducao * fonte_traducao.metrics("linespace")
+                topo_conteudo = 12
+                y_rotulo_original = topo_conteudo
+                y_texto_original = y_rotulo_original + fonte_rotulo.metrics("linespace") + 3
+                y_separador = y_texto_original + altura_original + 8
+                y_rotulo_traducao = y_separador + 9
+                y_texto_traducao = y_rotulo_traducao + fonte_rotulo.metrics("linespace") + 3
+                altura_cartao = y_texto_traducao + altura_traducao + 13
+
+                # O cartao fica abaixo da area lida; se nao couber, vai acima.
+                x1 = max(8, min(largura - largura_cartao - 8, tx - largura_cartao // 2))
+                y1 = ty + metade + 12
+                if y1 + altura_cartao > altura - 8:
+                    y1 = ty - metade - altura_cartao - 12
+                y1 = max(8, min(altura - altura_cartao - 8, y1))
+                x2 = x1 + largura_cartao
+                y2 = y1 + altura_cartao
+                pontos = pontos_retangulo_arredondado(x1, y1, x2, y2)
+                assinatura = (
+                    original, traducao, x1, y1, largura_cartao, altura_cartao,
+                    original_quebrado, traducao_quebrada,
+                )
+
+                canvas.itemconfigure(caixa_busca, state="normal")
+                coords_busca = (tx - metade, ty - metade, tx + metade, ty + metade)
+                if coords_busca != ultima_caixa_busca:
+                    canvas.coords(caixa_busca, *coords_busca)
+                    ultima_caixa_busca = coords_busca
+
+                if assinatura != ultimo_estado_cartao:
+                    canvas.coords(sombra, *pontos_retangulo_arredondado(
+                        x1 + 4, y1 + 5, x2 + 4, y2 + 5
+                    ))
+                    canvas.coords(cartao, *pontos)
+                    canvas.coords(rotulo_original, x1 + margem, y1 + y_rotulo_original)
+                    canvas.coords(texto_original, x1 + margem, y1 + y_texto_original)
+                    canvas.itemconfigure(texto_original, text=original_quebrado)
+                    canvas.coords(separador, x1 + margem, y1 + y_separador,
+                                  x2 - margem, y1 + y_separador)
+                    canvas.coords(rotulo_traducao, x1 + margem, y1 + y_rotulo_traducao)
+                    canvas.coords(texto_traducao, x1 + margem, y1 + y_texto_traducao)
+                    canvas.itemconfigure(texto_traducao, text=traducao_quebrada)
+                    for item in (
+                        sombra, cartao, rotulo_original, texto_original,
+                        separador, rotulo_traducao, texto_traducao,
+                    ):
+                        canvas.itemconfigure(item, state="normal")
+                    ultimo_estado_cartao = assinatura
             else:
-                canvas.create_rectangle(
-                    mx - metade, my - metade, mx + metade, my + metade,
-                    outline="#f9e2af", width=2,
-                )
+                canvas.itemconfigure(caixa_busca, state="normal")
+                coords_busca = (mx - metade, my - metade, mx + metade, my + metade)
+                if coords_busca != ultima_caixa_busca:
+                    canvas.coords(caixa_busca, *coords_busca)
+                    ultima_caixa_busca = coords_busca
+                if ultimo_estado_cartao is not None:
+                    for item in (
+                        sombra, cartao, rotulo_original, texto_original,
+                        separador, rotulo_traducao, texto_traducao,
+                    ):
+                        canvas.itemconfigure(item, state="hidden")
+                    ultimo_estado_cartao = None
         except Exception as erro:
             print(f"[OVERLAY] {erro}")
         janela_config.after(30, atualizar_frame)
@@ -343,6 +488,7 @@ tk.Label(linha_busca, text="Busca:").pack(side="left")
 busca_huggingface = tk.Entry(linha_busca)
 busca_huggingface.insert(0, CATEGORIAS_HUGGINGFACE["det"]["busca"])
 busca_huggingface.pack(side="left", fill="x", expand=True, padx=6)
+
 
 def trocar_categoria_huggingface(_evento=None):
     global categoria_huggingface

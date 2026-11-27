@@ -14,9 +14,11 @@ from rapidocr_onnxruntime import RapidOCR
 IDIOMA_ORIGEM = "en"
 IDIOMA_DESTINO = "pt"
 TAMANHO_CAIXA_MOUSE = 200
+TEMPO_TOLERANCIA_DETECCAO = 1.2
 
 engine = None
 executando = False
+texto_original_global = ""
 traducao_atual_global = ""
 posicao_traducao_global = (0, 0)
 ultimo_tempo_traducao = 0
@@ -80,8 +82,8 @@ def parar_tradutor():
 
 
 def executar_ocr():
-    global traducao_atual_global, posicao_traducao_global
-    global ultimo_tempo_traducao
+    global texto_original_global, traducao_atual_global
+    global posicao_traducao_global, ultimo_tempo_traducao
     texto_anterior = ""
 
     try:
@@ -115,16 +117,27 @@ def executar_ocr():
                         textos = []
 
                     if textos:
-                        texto = " ".join(textos)
+                        texto = " ".join(textos).strip()
+                        agora = time.time()
+                        posicao_traducao_global = (mx, my)
+                        ultimo_tempo_traducao = agora
+                        texto_original_global = texto
+
+                        # Traduz novamente apenas quando o texto reconhecido mudar.
                         if texto != texto_anterior:
                             texto_anterior = texto
                             traducao = argostranslate.translate.translate(
                                 texto, IDIOMA_ORIGEM, IDIOMA_DESTINO
                             )
-                            print(f"[TRADUZIDO]: {texto} -> {traducao}")
                             traducao_atual_global = traducao
-                            posicao_traducao_global = (mx, my)
-                            ultimo_tempo_traducao = time.time()
+                            print(f"[TRADUZIDO]: {texto} -> {traducao}")
+                    elif time.time() - ultimo_tempo_traducao > TEMPO_TOLERANCIA_DETECCAO:
+                        # Uma pequena tolerancia evita piscadas causadas por falhas
+                        # momentaneas do OCR; depois disso, o overlay volta ao modo
+                        # de busca e a mesma frase pode ser traduzida novamente.
+                        texto_anterior = ""
+                        texto_original_global = ""
+                        traducao_atual_global = ""
                 except Exception as erro:
                     print(f"[ERRO OCR]: {type(erro).__name__}: {erro}")
                 time.sleep(0.8)
