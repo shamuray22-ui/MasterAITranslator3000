@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.parse
@@ -334,7 +335,7 @@ def iniciar_overlay():
                     largura_conteudo_maxima,
                     max(
                         max(fonte_original.measure(linha) for linha in original_quebrado.split("\n")),
-                        max(fonte_traducao.measure(linha) for linha in traducao_quebrada.split("\n")),
+                        max(fonte_traducao.measure(linha) for linha in traducao_quebrado.split("\n")),
                         190,
                     ),
                 )
